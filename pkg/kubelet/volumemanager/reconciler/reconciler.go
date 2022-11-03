@@ -65,7 +65,7 @@ type Reconciler interface {
 	// If attach/detach management is enabled, the manager will also check if
 	// volumes that should be attached are attached and volumes that should
 	// be detached are detached and trigger attach/detach operations as needed.
-	Run(stopCh <-chan struct{})
+	Run(sourcesReady config.SourcesReady, stopCh <-chan struct{})
 
 	// StatesHasBeenSynced returns true only after syncStates process starts to sync
 	// states at least once after kubelet starts
@@ -154,7 +154,10 @@ type reconciler struct {
 	timeOfLastSync                time.Time
 }
 
-func (rc *reconciler) Run(stopCh <-chan struct{}) {
+func (rc *reconciler) Run(sourcesReady config.SourcesReady, stopCh <-chan struct{}) {
+	wait.PollUntil(rc.loopSleepDuration, func() (bool, error) {
+		return sourcesReady.AllReady(), nil
+	}, stopCh)
 	wait.Until(rc.reconciliationLoopFunc(), rc.loopSleepDuration, stopCh)
 }
 
