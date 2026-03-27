@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/util/swap"
@@ -536,9 +538,57 @@ func (ed *emptyDir) teardownDefault(dir string) error {
 			klog.Warningf("Warning: Failed to clear quota on %s: %v", dir, err)
 		}
 	}
+
+	// Unmount any nested mount points before removing the directory.
+	// If other volumes are mounted inside this emptyDir (e.g., another
+	// volume mounted at a subdirectory), os.RemoveAll would traverse into
+	// those mounts and delete their data. We must unmount them first.
+	if err := ed.unmountNestedMountPoints(dir); err != nil {
+		klog.Warningf("Warning: Failed to unmount nested mount points in %s: %v", dir, err)
+	}
+
 	// Renaming the directory is not required anymore because the operation executor
 	// now handles duplicate operations on the same volume
 	return os.RemoveAll(dir)
+}
+
+// unmountNestedMountPoints finds and unmounts any mount points that exist
+// under dir. Mount points are unmounted in reverse lexicographic order so
+// that deeply nested mounts are removed before their parents.
+func (ed *emptyDir) unmountNestedMountPoints(dir string) error {
+	if ed.mounter == nil {
+		return nil
+	}
+
+	mountPoints, err := ed.mounter.List()
+	if err != nil {
+		return fmt.Errorf("failed to list mount points: %v", err)
+	}
+
+	dirWithSlash := dir + string(os.PathSeparator)
+
+	// Collect all mount points that are nested under dir.
+	var nestedMounts []string
+	for _, mp := range mountPoints {
+		if strings.HasPrefix(mp.Path, dirWithSlash) {
+			nestedMounts = append(nestedMounts, mp.Path)
+		}
+	}
+
+	if len(nestedMounts) == 0 {
+		return nil
+	}
+
+	// Sort in reverse order so deeper mounts are unmounted first.
+	sort.Sort(sort.Reverse(sort.StringSlice(nestedMounts)))
+
+	for _, mp := range nestedMounts {
+		klog.V(4).Infof("Unmounting nested mount point %q before removing emptyDir %q", mp, dir)
+		if err := ed.mounter.Unmount(mp); err != nil {
+			return fmt.Errorf("failed to unmount nested mount point %s: %v", mp, err)
+		}
+	}
+	return nil
 }
 
 func (ed *emptyDir) teardownTmpfsOrHugetlbfs(dir string) error {

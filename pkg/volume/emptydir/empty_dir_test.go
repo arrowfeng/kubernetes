@@ -1207,3 +1207,108 @@ func TestTmpfsMountOptions(t *testing.T) {
 		})
 	}
 }
+
+func TestTeardownDefaultUnmountsNestedMountPoints(t *testing.T) {
+	basePath, err := utiltesting.MkTmpdir("emptydir_nested_mount_test")
+	if err != nil {
+		t.Fatalf("can't make a temp rootdir: %v", err)
+	}
+	defer os.RemoveAll(basePath)
+
+	volPath := filepath.Join(basePath, "pods/poduid/volumes/kubernetes.io~empty-dir/test-volume")
+	nestedMount1 := filepath.Join(volPath, "nested1")
+	nestedMount2 := filepath.Join(volPath, "nested1", "nested2")
+
+	// Create the directory structure
+	if err := os.MkdirAll(nestedMount2, 0755); err != nil {
+		t.Fatalf("failed to create nested dirs: %v", err)
+	}
+
+	// Set up a fake mounter that reports nested mount points
+	physicalMounter := mount.NewFakeMounter([]mount.MountPoint{
+		{Path: nestedMount1},
+		{Path: nestedMount2},
+	})
+
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID: types.UID("poduid"),
+		},
+	}
+
+	ed := &emptyDir{
+		pod:           pod,
+		volName:       "test-volume",
+		medium:        v1.StorageMediumDefault,
+		mounter:       physicalMounter,
+		mountDetector: &fakeMountDetector{medium: v1.StorageMediumDefault, isMount: false},
+	}
+
+	if err := ed.teardownDefault(volPath); err != nil {
+		t.Fatalf("teardownDefault failed: %v", err)
+	}
+
+	// Verify that unmount was called for the nested mount points
+	log := physicalMounter.GetLog()
+	if len(log) != 2 {
+		t.Fatalf("expected 2 unmount calls for nested mounts, got %d: %v", len(log), log)
+	}
+
+	// Deeper mount should be unmounted first (reverse order)
+	if log[0].Action != mount.FakeActionUnmount || log[0].Target != nestedMount2 {
+		t.Errorf("expected first unmount to be for %s, got action=%s target=%s", nestedMount2, log[0].Action, log[0].Target)
+	}
+	if log[1].Action != mount.FakeActionUnmount || log[1].Target != nestedMount1 {
+		t.Errorf("expected second unmount to be for %s, got action=%s target=%s", nestedMount1, log[1].Action, log[1].Target)
+	}
+
+	// Verify the volume directory was removed
+	if _, err := os.Stat(volPath); !os.IsNotExist(err) {
+		t.Errorf("expected volume path %s to be removed", volPath)
+	}
+}
+
+func TestTeardownDefaultNoNestedMounts(t *testing.T) {
+	basePath, err := utiltesting.MkTmpdir("emptydir_no_nested_mount_test")
+	if err != nil {
+		t.Fatalf("can't make a temp rootdir: %v", err)
+	}
+	defer os.RemoveAll(basePath)
+
+	volPath := filepath.Join(basePath, "pods/poduid/volumes/kubernetes.io~empty-dir/test-volume")
+	if err := os.MkdirAll(volPath, 0755); err != nil {
+		t.Fatalf("failed to create vol dir: %v", err)
+	}
+
+	// No nested mount points
+	physicalMounter := mount.NewFakeMounter(nil)
+
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID: types.UID("poduid"),
+		},
+	}
+
+	ed := &emptyDir{
+		pod:           pod,
+		volName:       "test-volume",
+		medium:        v1.StorageMediumDefault,
+		mounter:       physicalMounter,
+		mountDetector: &fakeMountDetector{medium: v1.StorageMediumDefault, isMount: false},
+	}
+
+	if err := ed.teardownDefault(volPath); err != nil {
+		t.Fatalf("teardownDefault failed: %v", err)
+	}
+
+	// No unmount calls should have been made
+	log := physicalMounter.GetLog()
+	if len(log) != 0 {
+		t.Errorf("expected 0 unmount calls, got %d: %v", len(log), log)
+	}
+
+	// Verify the volume directory was removed
+	if _, err := os.Stat(volPath); !os.IsNotExist(err) {
+		t.Errorf("expected volume path %s to be removed", volPath)
+	}
+}
